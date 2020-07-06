@@ -11,12 +11,15 @@ import (
 	"strconv"
 )
 
-type DelegateWorkArgs struct{}
+type DelegateWorkArgs struct {
+	WorkerId int
+}
 type DelegateWorkReply struct {
-	FilePath    string
-	FileName    string
-	PieceNumber int
-	MasterState string
+	FilePath        string
+	FileName        string
+	PieceNumber     int // used when mapping
+	PartitionNumber int // used when reducing
+	MasterState     MasterState
 }
 
 type HeartbeatArgs struct {
@@ -30,9 +33,15 @@ type MarkMapCompleteArgs struct {
 }
 type MarkMapCompleteReply struct{}
 
-type GetnReduceArgs struct{}
-type GetnReduceReply struct {
+type MarkPartitionCompleteArgs struct {
+	Partition int
+}
+type MarkPartitionCompleteReply struct{}
+
+type GetConfigArgs struct{}
+type GetConfigReply struct {
 	NReduce int
+	NMap    int
 }
 
 // Add your RPC definitions here.

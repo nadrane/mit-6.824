@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -10,6 +11,7 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -28,6 +30,7 @@ type Partitions = map[int][]KeyValue
 type MapFunc = func(string, string) []KeyValue
 type ReduceFunc = func(string, []string) string
 type GroupByKey = map[string][]string
+type ReduceResults = map[string]string
 
 // for sorting by key.
 func (a ByKey) Len() int           { return len(a) }
@@ -57,14 +60,14 @@ func ReadFile(filePath string) []byte {
 	return content
 }
 
-func mapNext(nextChunk DelegateWorkReply, mapf MapFunc, nReduce int) {
+func mapNext(job DelegateWorkReply, mapf MapFunc, config GetConfigReply) {
 	// Map file contents
-	content := ReadFile(nextChunk.FilePath)
-	keyValues := mapf(nextChunk.FileName, string(content))
+	content := ReadFile(job.FilePath)
+	keyValues := mapf(job.FileName, string(content))
 
 	// Write out keys to correct files
-	for partitionKey, kvs := range groupByPartition(keyValues, nReduce) {
-		intermediateFilePath := generateFileName(nextChunk.PieceNumber, partitionKey)
+	for partitionKey, kvs := range groupByPartition(keyValues, config.NReduce) {
+		intermediateFilePath := generateFileName(job.PieceNumber, partitionKey)
 		fileHandler, err := os.Create(intermediateFilePath)
 
 		enc := json.NewEncoder(fileHandler)
@@ -77,15 +80,15 @@ func mapNext(nextChunk DelegateWorkReply, mapf MapFunc, nReduce int) {
 		fileHandler.Close()
 	}
 
-	MarkMapComplete(nextChunk.PieceNumber)
+	MarkMapComplete(job.PieceNumber)
 }
 
-func reduceNext(chunk DelegateWorkReply, reducef ReduceFunc, nReduce int) {
+func reduceNext(job DelegateWorkReply, reducef ReduceFunc, config GetConfigReply) {
 	allGroups := make(GroupByKey)
 	nextGroup := make(GroupByKey)
 
-	for i := 0; i < nReduce; i++ {
-		fileName := generateFileName(chunk.PieceNumber, i)
+	for i := 0; i < config.NMap; i++ {
+		fileName := generateFileName(i, job.PartitionNumber)
 
 		file, err := os.Open(fileName)
 		if err != nil {
@@ -102,13 +105,39 @@ func reduceNext(chunk DelegateWorkReply, reducef ReduceFunc, nReduce int) {
 		allGroups = mergeGroups(allGroups, nextGroup)
 	}
 
-	var allPairs []struct{key string; values []string}
-	for key, values := range allGroups {
-		allPairs = append(allPairs, struct{key: key, values: values})
-		v := reducef(key, values)
-		fmt.Println(key, v)
+	// Collect results
+	var results = make(ReduceResults)
+	for key := range allGroups {
+		results[key] = reducef(key, allGroups[key])
 	}
 
+	// Sort keys
+	sortedKeys := make([]string, 0, len(allGroups))
+	for k := range allGroups {
+		sortedKeys = append(sortedKeys, k)
+	}
+	sort.Strings(sortedKeys)
+
+	// Create temp file
+	tempFile, err := ioutil.TempFile("map-intermediates", "*")
+	if err != nil {
+		fmt.Println("Failed to create temp file", err)
+	}
+
+	// Write results to temp file
+	datawriter := bufio.NewWriter(tempFile)
+
+	for _, k := range sortedKeys {
+		_, err = datawriter.WriteString(k + " " + results[k] + "\n")
+		if err != nil {
+			fmt.Println("Failed to write results to temp file", err)
+		}
+	}
+
+	datawriter.Flush()
+
+	// Atomically rename temp file
+	os.Rename(tempFile.Name(), "mr-out-"+strconv.Itoa(job.PartitionNumber))
 }
 
 func generateFileName(mapTask int, reduceTask int) string {
@@ -156,10 +185,10 @@ func mergeGroups(group1 GroupByKey, group2 GroupByKey) GroupByKey {
 }
 
 func Worker(mapf MapFunc, reducef ReduceFunc) {
-	nReduce := GetnReduce()
+	config := GetConfig()
 	go LoopHeartbeat()
 
-	LoopStateFunction(mapf, reducef, nReduce)
+	LoopStateFunction(mapf, reducef, config)
 }
 
 func LoopHeartbeat() {
@@ -169,15 +198,15 @@ func LoopHeartbeat() {
 	}
 }
 
-func LoopStateFunction(mapf MapFunc, reducef ReduceFunc, nReduce int) {
+func LoopStateFunction(mapf MapFunc, reducef ReduceFunc, config GetConfigReply) {
 	for {
 		nextJob := GetWork()
-		fmt.Println("nextjob", nextJob)
-		if nextJob.MasterState == "mapping" {
-			mapNext(nextJob, mapf, nReduce)
-		} else if nextJob.MasterState == "reducing" {
-			reduceNext(nextJob, reducef, nReduce)
-		} else if nextJob.MasterState == "done" {
+		fmt.Println("nextjob", id, nextJob)
+		if nextJob.MasterState == masterMapping {
+			mapNext(nextJob, mapf, config)
+		} else if nextJob.MasterState == masterReducing {
+			reduceNext(nextJob, reducef, config)
+		} else if nextJob.MasterState == masterComplete {
 			fmt.Println("done!")
 			time.Sleep(10 * time.Second)
 		}
@@ -186,14 +215,14 @@ func LoopStateFunction(mapf MapFunc, reducef ReduceFunc, nReduce int) {
 
 // RPC Functions
 
-func GetnReduce() int {
+func GetConfig() GetConfigReply {
 
-	args := GetnReduceArgs{}
-	reply := GetnReduceReply{}
+	args := GetConfigArgs{}
+	reply := GetConfigReply{}
 
 	// send the RPC request, wait for the reply.
-	call("Master.GetnReduce", &args, &reply)
-	return reply.NReduce
+	call("Master.GetConfig", &args, &reply)
+	return reply
 }
 
 func GetWork() DelegateWorkReply {
