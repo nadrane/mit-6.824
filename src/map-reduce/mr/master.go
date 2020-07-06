@@ -11,28 +11,28 @@ import (
 	"sync"
 )
 
-type MasterState int
+type MasterState string
 
 const (
-	masterMapping MasterState = iota
-	masterReducing
-	masterComplete
+	masterMapping  MasterState = "mapping"
+	masterReducing             = "reducing"
+	masterComplete             = "complete"
 )
 
-type ChunkState int
+type ChunkState string
 
 const (
-	newChunk ChunkState = iota
-	mappingChunk
-	completeChunk
+	newChunk      ChunkState = "new chunk"
+	mappingChunk             = "mapping chunk"
+	completeChunk            = "compelte chunk"
 )
 
-type PartitionState int
+type PartitionState string
 
 const (
-	newPartition PartitionState = iota
-	reducingPartition
-	completePartition
+	newPartition      PartitionState = "new partition"
+	reducingPartition                = "reducing partition"
+	completePartition                = "complete partition"
 )
 
 type WorkerData struct {
@@ -56,19 +56,21 @@ type ReducePartition struct {
 }
 
 type Master struct {
-	chunks     map[int]*Chunk
-	workers    map[int]*WorkerData
-	partitions map[int]*ReducePartition
-	nReduce    int
-	nMap       int
-	chunkLock  sync.Mutex
-	workerLock sync.Mutex
+	chunks        map[int]*Chunk
+	workers       map[int]*WorkerData
+	partitions    map[int]*ReducePartition
+	nReduce       int
+	nMap          int
+	chunkLock     sync.Mutex
+	partitionLock sync.Mutex
+	workerLock    sync.Mutex
 }
 
 func (m *Master) MarkMapComplete(args *MarkMapCompleteArgs, reply *MarkMapCompleteReply) error {
 
 	m.chunkLock.Lock()
 	m.chunks[args.Piece].state = completeChunk
+	// fmt.Println("chunk mapped", args.Piece)
 	m.chunkLock.Unlock()
 
 	return nil
@@ -78,7 +80,13 @@ func (m *Master) MarkPartitionComplete(args *MarkPartitionCompleteArgs, reply *M
 
 	m.chunkLock.Lock()
 	m.partitions[args.Partition].state = completePartition
+	// fmt.Println("partition reduced", args.Partition)
 	m.chunkLock.Unlock()
+
+	if m.GetState() == masterComplete {
+		fmt.Println("Map Reduce Job Complete")
+		os.Exit(0)
+	}
 
 	return nil
 }
@@ -89,20 +97,29 @@ func (m *Master) DelegateWork(args *DelegateWorkArgs, reply *DelegateWorkReply) 
 	m.chunkLock.Lock()
 	defer m.chunkLock.Unlock()
 
+	m.partitionLock.Lock()
+	defer m.partitionLock.Unlock()
+
 	if masterState == masterMapping {
-		// TODO What happens when there are no available chunks?
-		chunk := m.FindNextChunk()
-		chunk.state = mappingChunk
+		chunk, readyForWork := m.findNextChunk()
 
-		reply.FileName = chunk.name
-		reply.FilePath = chunk.filepath
-		reply.PieceNumber = chunk.pieceNumber
+		if readyForWork {
+			chunk.state = mappingChunk
+			reply.FileName = chunk.name
+			reply.FilePath = chunk.filepath
+			reply.PieceNumber = chunk.pieceNumber
+		} else {
+			reply.Busy = true
+		}
 	} else if masterState == masterReducing {
-		// TODO What happens when there are no available partition?
-		partition := m.FindNextPartition()
-		partition.state = reducingPartition
+		partition, readyForWork := m.findNextPartition()
 
-		reply.PartitionNumber = partition.partitionNumber
+		if readyForWork {
+			partition.state = reducingPartition
+			reply.PartitionNumber = partition.partitionNumber
+		} else {
+			reply.Busy = true
+		}
 	}
 	reply.MasterState = masterState
 
@@ -121,6 +138,9 @@ func (m *Master) GetState() MasterState {
 
 	// All chunks must be complete. Start looking at partitions now to see if
 	// those are complete
+	m.partitionLock.Lock()
+	defer m.partitionLock.Unlock()
+
 	for _, partition := range m.partitions {
 		if partition.state == newPartition || partition.state == reducingPartition {
 			return masterReducing
@@ -169,29 +189,29 @@ func (m *Master) server() {
 }
 
 // Find a new chunk
-func (m *Master) FindNextChunk() *Chunk {
+func (m *Master) findNextChunk() (*Chunk, bool) {
 	var ret *Chunk
 
 	for _, ret = range m.chunks {
 		if ret.state == newChunk {
-			return ret
+			return ret, true
 		}
 	}
 
-	return ret
+	return ret, false
 }
 
 // Find a new partition
-func (m *Master) FindNextPartition() *ReducePartition {
+func (m *Master) findNextPartition() (*ReducePartition, bool) {
 	var ret *ReducePartition
 
 	for _, ret = range m.partitions {
 		if ret.state == newPartition {
-			return ret
+			return ret, true
 		}
 	}
 
-	return ret
+	return ret, false
 }
 
 //

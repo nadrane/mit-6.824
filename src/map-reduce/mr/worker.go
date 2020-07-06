@@ -5,12 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/rpc"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"time"
@@ -45,21 +43,6 @@ func getPartitionNumber(key string, nReduce int) int {
 	return int(h.Sum32()&0x7fffffff) % nReduce
 }
 
-func ReadFile(filePath string) []byte {
-	file, err := os.Open(filePath)
-	if err != nil {
-		log.Fatalf("cannot open %v", filePath)
-	}
-
-	content, err := ioutil.ReadAll(file)
-	if err != nil {
-		log.Fatalf("cannot read %v", filePath)
-	}
-	file.Close()
-
-	return content
-}
-
 func mapNext(job DelegateWorkReply, mapf MapFunc, config GetConfigReply) {
 	// Map file contents
 	content := ReadFile(job.FilePath)
@@ -67,7 +50,7 @@ func mapNext(job DelegateWorkReply, mapf MapFunc, config GetConfigReply) {
 
 	// Write out keys to correct files
 	for partitionKey, kvs := range groupByPartition(keyValues, config.NReduce) {
-		intermediateFilePath := generateFileName(job.PieceNumber, partitionKey)
+		intermediateFilePath := GenerateFileName(job.PieceNumber, partitionKey)
 		fileHandler, err := os.Create(intermediateFilePath)
 
 		enc := json.NewEncoder(fileHandler)
@@ -80,15 +63,14 @@ func mapNext(job DelegateWorkReply, mapf MapFunc, config GetConfigReply) {
 		fileHandler.Close()
 	}
 
-	MarkMapComplete(job.PieceNumber)
+	markMapComplete(job.PieceNumber)
 }
 
 func reduceNext(job DelegateWorkReply, reducef ReduceFunc, config GetConfigReply) {
 	allGroups := make(GroupByKey)
-	nextGroup := make(GroupByKey)
 
 	for i := 0; i < config.NMap; i++ {
-		fileName := generateFileName(i, job.PartitionNumber)
+		fileName := GenerateFileName(i, job.PartitionNumber)
 
 		file, err := os.Open(fileName)
 		if err != nil {
@@ -96,7 +78,7 @@ func reduceNext(job DelegateWorkReply, reducef ReduceFunc, config GetConfigReply
 		}
 
 		dec := json.NewDecoder(file)
-
+		nextGroup := make(GroupByKey)
 		err = dec.Decode(&nextGroup)
 		if err != nil {
 			fmt.Println("cannot read json file", err)
@@ -119,16 +101,13 @@ func reduceNext(job DelegateWorkReply, reducef ReduceFunc, config GetConfigReply
 	sort.Strings(sortedKeys)
 
 	// Create temp file
-	tempFile, err := ioutil.TempFile("map-intermediates", "*")
-	if err != nil {
-		fmt.Println("Failed to create temp file", err)
-	}
+	tempFile := GenerateTempFile()
 
 	// Write results to temp file
 	datawriter := bufio.NewWriter(tempFile)
 
 	for _, k := range sortedKeys {
-		_, err = datawriter.WriteString(k + " " + results[k] + "\n")
+		_, err := datawriter.WriteString(k + " " + results[k] + "\n")
 		if err != nil {
 			fmt.Println("Failed to write results to temp file", err)
 		}
@@ -138,10 +117,8 @@ func reduceNext(job DelegateWorkReply, reducef ReduceFunc, config GetConfigReply
 
 	// Atomically rename temp file
 	os.Rename(tempFile.Name(), "mr-out-"+strconv.Itoa(job.PartitionNumber))
-}
 
-func generateFileName(mapTask int, reduceTask int) string {
-	return filepath.Join("map-intermediates", strconv.Itoa(mapTask)+"-"+strconv.Itoa(reduceTask))
+	markPartitionComplete(job.PartitionNumber)
 }
 
 func groupByPartition(kvs []KeyValue, nReduce int) Partitions {
@@ -185,37 +162,39 @@ func mergeGroups(group1 GroupByKey, group2 GroupByKey) GroupByKey {
 }
 
 func Worker(mapf MapFunc, reducef ReduceFunc) {
-	config := GetConfig()
-	go LoopHeartbeat()
+	config := getConfig()
+	go loopHeartbeat()
 
-	LoopStateFunction(mapf, reducef, config)
+	loopStateFunction(mapf, reducef, config)
 }
 
-func LoopHeartbeat() {
+func loopHeartbeat() {
 	for {
 		Heartbeat()
 		time.Sleep(2 * time.Second)
 	}
 }
 
-func LoopStateFunction(mapf MapFunc, reducef ReduceFunc, config GetConfigReply) {
+func loopStateFunction(mapf MapFunc, reducef ReduceFunc, config GetConfigReply) {
 	for {
-		nextJob := GetWork()
-		fmt.Println("nextjob", id, nextJob)
-		if nextJob.MasterState == masterMapping {
+		nextJob := getWork()
+		// fmt.Println("nextjob", id, nextJob)
+		if nextJob.Busy {
+			time.Sleep(2 * time.Second)
+		} else if nextJob.MasterState == masterMapping {
 			mapNext(nextJob, mapf, config)
 		} else if nextJob.MasterState == masterReducing {
 			reduceNext(nextJob, reducef, config)
 		} else if nextJob.MasterState == masterComplete {
 			fmt.Println("done!")
-			time.Sleep(10 * time.Second)
+			os.Exit(0)
 		}
 	}
 }
 
 // RPC Functions
 
-func GetConfig() GetConfigReply {
+func getConfig() GetConfigReply {
 
 	args := GetConfigArgs{}
 	reply := GetConfigReply{}
@@ -225,7 +204,7 @@ func GetConfig() GetConfigReply {
 	return reply
 }
 
-func GetWork() DelegateWorkReply {
+func getWork() DelegateWorkReply {
 
 	args := DelegateWorkArgs{}
 	reply := DelegateWorkReply{}
@@ -247,14 +226,22 @@ func Heartbeat() HeartbeatReply {
 	return reply
 }
 
-func MarkMapComplete(piece int) {
+func markMapComplete(piece int) {
 	args := MarkMapCompleteArgs{Piece: piece}
 	reply := MarkMapCompleteReply{}
 
 	// send the RPC request, wait for the reply.
 	call("Master.MarkMapComplete", &args, &reply)
 
-	fmt.Printf("map complete %v\n", piece)
+	return
+}
+
+func markPartitionComplete(partition int) {
+	args := MarkPartitionCompleteArgs{Partition: partition}
+	reply := MarkPartitionCompleteReply{}
+
+	// send the RPC request, wait for the reply.
+	call("Master.MarkPartitionComplete", &args, &reply)
 
 	return
 }

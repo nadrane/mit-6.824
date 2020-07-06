@@ -20,6 +20,7 @@ type DelegateWorkReply struct {
 	PieceNumber     int // used when mapping
 	PartitionNumber int // used when reducing
 	MasterState     MasterState
+	Busy            bool // indicates that the master has no work for the worker
 }
 
 type HeartbeatArgs struct {
