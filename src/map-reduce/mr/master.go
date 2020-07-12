@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 type MasterState string
@@ -53,6 +54,7 @@ type Chunk struct {
 type ReducePartition struct {
 	partitionNumber int
 	state           PartitionState
+	owner           int // which worker is processing this partition
 }
 
 type Master struct {
@@ -70,7 +72,7 @@ func (m *Master) MarkMapComplete(args *MarkMapCompleteArgs, reply *MarkMapComple
 
 	m.chunkLock.Lock()
 	m.chunks[args.Piece].state = completeChunk
-	// fmt.Println("chunk mapped", args.Piece)
+	fmt.Println("chunk mapped", args.Piece)
 	m.chunkLock.Unlock()
 
 	return nil
@@ -80,7 +82,7 @@ func (m *Master) MarkPartitionComplete(args *MarkPartitionCompleteArgs, reply *M
 
 	m.chunkLock.Lock()
 	m.partitions[args.Partition].state = completePartition
-	// fmt.Println("partition reduced", args.Partition)
+	fmt.Println("partition reduced", args.Partition)
 	m.chunkLock.Unlock()
 
 	if m.GetState() == masterComplete {
@@ -105,6 +107,7 @@ func (m *Master) DelegateWork(args *DelegateWorkArgs, reply *DelegateWorkReply) 
 
 		if readyForWork {
 			chunk.state = mappingChunk
+			chunk.owner = args.WorkerId
 			reply.FileName = chunk.name
 			reply.FilePath = chunk.filepath
 			reply.PieceNumber = chunk.pieceNumber
@@ -116,6 +119,7 @@ func (m *Master) DelegateWork(args *DelegateWorkArgs, reply *DelegateWorkReply) 
 
 		if readyForWork {
 			partition.state = reducingPartition
+			partition.owner = args.WorkerId
 			reply.PartitionNumber = partition.partitionNumber
 		} else {
 			reply.Busy = true
@@ -153,17 +157,71 @@ func (m *Master) GetState() MasterState {
 }
 
 func (m *Master) Heartbeat(args *HeartbeatArgs, reply *HeartbeatReply) error {
+	fmt.Println("PROCESSING HEARTBEAT", args.Id)
 	m.workerLock.Lock()
-	defer m.workerLock.Unlock()
-
 	_, exists := m.workers[args.Id]
 	if exists {
-		m.workers[id].lastHeartbeat = args.Timestamp
+		m.workers[args.Id].lastHeartbeat = args.Timestamp
 	} else {
-		m.workers[id] = &WorkerData{id: args.Id, lastHeartbeat: args.Timestamp}
+		fmt.Println("registering new worker", args.Id)
+		m.workers[args.Id] = &WorkerData{id: args.Id, lastHeartbeat: args.Timestamp}
 	}
+	m.workerLock.Unlock()
+
+	m.identifyAndResetFailedWokers()
 
 	return nil
+}
+
+func (m *Master) identifyAndResetFailedWokers() {
+	masterState := m.GetState()
+
+	m.workerLock.Lock()
+	defer m.workerLock.Unlock()
+	m.chunkLock.Lock()
+	defer m.chunkLock.Unlock()
+	m.partitionLock.Lock()
+	defer m.partitionLock.Unlock()
+
+	fmt.Println("EXPIRING WORKERS")
+	currentTime := time.Now().Unix()
+	fmt.Println("Current Time", currentTime)
+	expiredWorkers := make(map[int]*WorkerData)
+	fmt.Println("all workers", m.workers)
+	for _, worker := range m.workers {
+		fmt.Println("Worker", worker.id, worker.lastHeartbeat)
+		if worker.lastHeartbeat+10 < currentTime {
+			fmt.Println("Expired worker found")
+			expiredWorkers[worker.id] = worker
+		}
+	}
+
+	if masterState == masterMapping {
+		fmt.Println("ALL CHUNKS")
+		for _, chunk := range m.chunks {
+			fmt.Println(chunk)
+			_, isExpired := expiredWorkers[chunk.owner]
+			if isExpired {
+				fmt.Println("expired chunk found", chunk)
+				chunk.state = newChunk
+				chunk.owner = -1
+			}
+		}
+	} else if masterState == masterReducing {
+		for _, partition := range m.partitions {
+			_, isExpired := expiredWorkers[partition.owner]
+			if isExpired {
+				partition.state = newPartition
+				partition.owner = -1
+			}
+		}
+	}
+
+	for workerId := range expiredWorkers {
+		delete(m.workers, workerId)
+	}
+
+	fmt.Println()
 }
 
 func (m *Master) GetConfig(args *GetConfigArgs, reply *GetConfigReply) error {

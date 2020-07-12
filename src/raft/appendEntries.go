@@ -4,17 +4,11 @@ import "time"
 
 func (rf *Raft) syncLogEntries() {
 
-	// A server should not be sending any data (let alone log entries) to other
-	// servers if it is not the leader
-	rf.mu.Lock()
-	if rf.serverState != leader {
-		DPrintf("[%v]-[%v] Failure - Server attempted to send log entries when not the leader", rf.me, rf.currentTerm)
-		rf.mu.Unlock()
-		return
-	}
-	rf.mu.Unlock()
-
 	for {
+		if !rf.isStillLeader() {
+			return
+		}
+
 		for i := 0; i < len(rf.peers); i++ {
 			if i != rf.me {
 				go func(peerNum int) {
@@ -43,6 +37,23 @@ func (rf *Raft) syncLogEntries() {
 		}
 		time.Sleep(time.Duration(100) * time.Millisecond)
 	}
+}
+
+func (rf *Raft) isStillLeader() bool {
+	// A server should not be sending any data (let alone log entries) to other
+	// servers if it is not the leader
+
+	// This situation can arise in the case where a server is elected leader, loses connection,
+	// and then rejoins the cluster. When the new leader sends out it's heartbeat, the
+	// old leader will assume a follower role. We need a way to exit this loop in that circumstance
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.serverState != leader {
+		DPrintf("[%v]-[%v] Exiting Append Entries Loop - Server attempted to send log entries when not the leader", rf.me, rf.currentTerm)
+		return false
+	}
+	return true
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {

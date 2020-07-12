@@ -30,12 +30,12 @@ type ReduceFunc = func(string, []string) string
 type GroupByKey = map[string][]string
 type ReduceResults = map[string]string
 
+var id int
+
 // for sorting by key.
 func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
-
-var id = rand.Int()
 
 func getPartitionNumber(key string, nReduce int) int {
 	h := fnv.New32a()
@@ -162,6 +162,12 @@ func mergeGroups(group1 GroupByKey, group2 GroupByKey) GroupByKey {
 }
 
 func Worker(mapf MapFunc, reducef ReduceFunc) {
+	rand.Seed(int64(time.Now().Nanosecond()))
+	id = rand.Int()
+
+	fmt.Println("Starting new worker", id)
+
+	Heartbeat() // Register this worker with the master so it can be expired if failure happens before the heartbeat
 	config := getConfig()
 	go loopHeartbeat()
 
@@ -206,7 +212,7 @@ func getConfig() GetConfigReply {
 
 func getWork() DelegateWorkReply {
 
-	args := DelegateWorkArgs{}
+	args := DelegateWorkArgs{WorkerId: id}
 	reply := DelegateWorkReply{}
 
 	// send the RPC request, wait for the reply.
