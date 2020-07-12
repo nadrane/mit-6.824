@@ -37,15 +37,15 @@ func (rf *Raft) syncLogEntries() {
 }
 
 func (rf *Raft) isStillLeader() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	// A server should not be sending any data (let alone log entries) to other
 	// servers if it is not the leader
 
 	// This situation can arise in the case where a server is elected leader, loses connection,
-	// and then rejoins the cluster. When the new leader sends out it's heartbeat, the
+	// and then rejoins the cluster. When the new leader sends out its heartbeat, the
 	// old leader will assume a follower role. We need a way to exit this loop in that circumstance
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	if rf.serverState != leader {
 		DPrintf("[%v]-[%v] Exiting Append Entries Loop - Server attempted to send log entries when not the leader", rf.me, rf.currentTerm)
 		return false
