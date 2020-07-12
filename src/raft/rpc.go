@@ -35,3 +35,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
+
+func (rf *Raft) sendRPCToAll(f func(peerNum int)) {
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			go f(i)
+		}
+	}
+}

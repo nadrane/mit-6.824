@@ -9,32 +9,29 @@ func (rf *Raft) syncLogEntries() {
 			return
 		}
 
-		for i := 0; i < len(rf.peers); i++ {
-			if i != rf.me {
-				go func(peerNum int) {
-					rf.mu.Lock()
-					args := AppendEntriesArgs{
-						Term:     rf.currentTerm,
-						LeaderId: rf.me,
-					}
-					rf.mu.Unlock()
-
-					reply := AppendEntriesReply{}
-
-					rf.sendAppendEntries(peerNum, &args, &reply)
-
-					rf.mu.Lock()
-					defer rf.mu.Unlock()
-					// If one of the other server's has a higher term than this server,
-					// Then this server likely experienced a partition and can no longer be considered the leader
-					if reply.Term > rf.currentTerm {
-						rf.serverState = follower
-						rf.currentTerm = reply.Term
-						return
-					}
-				}(i)
+		rf.sendRPCToAll(func(peerNum int) {
+			rf.mu.Lock()
+			args := AppendEntriesArgs{
+				Term:     rf.currentTerm,
+				LeaderId: rf.me,
 			}
-		}
+			rf.mu.Unlock()
+
+			reply := AppendEntriesReply{}
+
+			rf.sendAppendEntries(peerNum, &args, &reply)
+
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			// If one of the other server's has a higher term than this server,
+			// Then this server likely experienced a partition and can no longer be considered the leader
+			if reply.Term > rf.currentTerm {
+				rf.serverState = follower
+				rf.currentTerm = reply.Term
+				return
+			}
+		})
+
 		time.Sleep(time.Duration(100) * time.Millisecond)
 	}
 }

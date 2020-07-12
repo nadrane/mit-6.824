@@ -69,7 +69,7 @@ type Raft struct {
 	electionTimeout time.Duration       // Number of milliseconds until next election
 	needElection    bool                // Should we have an election when the electionTimeout wait is over?
 	serverState     serverState         // The role this server believes it is playing
-	voteHistory     []bool              // Which terms has this server voted in so far? The index is the election term.
+	voteFor         int                 // Which server was voted for in this term?
 }
 
 // return currentTerm and whether this server
@@ -185,14 +185,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.needElection = true
 	rf.serverState = follower
-
-	// Just make this big enough for now that we don't need to worry about exceeding it
-	rf.voteHistory = make([]bool, 10000)
-
-	go rf.loopElection()
+	rf.voteFor = -1
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	go rf.loopElection()
 
 	return rf
 }
