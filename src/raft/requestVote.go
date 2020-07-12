@@ -66,13 +66,12 @@ func (rf *Raft) loopElection() {
 				return
 			}
 
-			// The other machines are already operating at a higher term,
-			// which makes this election invalid
-			if rf.currentTerm < reply.Term {
-				DPrintf("[%v-%v] Candidate does not have highest term. Term %v received from %v", rf.me,
-					rf.currentTerm, reply.Term, peerNum)
-
-				rf.currentTerm = reply.Term
+			// Sometimes responses are significantly delayed and came back after the currentTerm
+			// has advanced. In this case, these responses are invalid because either
+			// 1. This server has started a new election at a higher term
+			// 2. Another server is already the leader (we'll exit above in this case)
+			if rf.currentTerm > reply.Term {
+				DPrintf("[%v-%v] RequestVote responses recieved after starting new election. Term %v received from %v", rf.me, rf.currentTerm, reply.Term, peerNum)
 				rf.serverState = follower
 				return
 			}
